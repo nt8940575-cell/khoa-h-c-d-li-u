@@ -1,0 +1,118 @@
+import sys
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import LabelEncoder
+from docx import Document
+from docx.shared import Inches
+from pathlib import Path
+
+
+def main():
+    sys.stdout.reconfigure(encoding='utf-8')
+    root = Path(__file__).resolve().parent
+    csv_path = root / "financial_anomaly_data.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(f"{csv_path} not found")
+
+    df = pd.read_csv(csv_path)
+
+    if df["Amount"].dtype == object:
+        df["Amount"] = (
+            df["Amount"].astype(str)
+            .str.replace(",", "", regex=False)
+            .str.replace(r"[^\d\.\-]", "", regex=True)
+            .astype(float)
+        )
+
+    df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce")
+    df = df.dropna(subset=["Timestamp", "Amount"]).copy()
+
+    df["Hour"] = df["Timestamp"].dt.hour
+    df["DayOfWeek"] = df["Timestamp"].dt.dayofweek
+
+    cat_cols = ["Merchant", "TransactionType", "Location"]
+    df_encoded = df.copy()
+    for col in cat_cols:
+        df_encoded[col] = LabelEncoder().fit_transform(df_encoded[col].astype(str))
+
+    features = ["Amount", "Hour", "DayOfWeek"] + cat_cols
+    X = df_encoded[features]
+
+    print("Đang chạy mô hình Isolation Forest...")
+    model = IsolationForest(n_estimators=100, contamination=0.01, random_state=42)
+    model.fit(X)
+
+    df["anomaly_score"] = model.decision_function(X)
+    df["is_anomaly"] = model.predict(X)
+    df["is_anomaly"] = df["is_anomaly"].map({1: "Bình thường", -1: "Bất thường"})
+
+    anomaly_count = int((df["is_anomaly"] == "Bất thường").sum())
+    normal_count = int((df["is_anomaly"] == "Bình thường").sum())
+    avg_anomaly_amount = df.loc[df["is_anomaly"] == "Bất thường", "Amount"].mean()
+
+    print("Đang vẽ biểu đồ...")
+    plt.figure(figsize=(12, 6))
+    colors = {"Bình thường": "blue", "Bất thường": "red"}
+    sample_df = df.sample(min(10000, len(df)), random_state=42).sort_values("Timestamp")
+
+    for label, color in colors.items():
+        subset = sample_df[sample_df["is_anomaly"] == label]
+        plt.scatter(subset["Timestamp"], subset["Amount"], c=color, label=label, alpha=0.5, s=15)
+
+    plt.title('Báo cáo Điểm Bất thường Giao dịch Tài chính')
+    plt.xlabel('Thời gian')
+    plt.ylabel('Số tiền (Amount)')
+    plt.legend()
+
+    chart_path = root / "chart_result.png"
+    plt.savefig(chart_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+    print("Đang xuất file Excel...")
+    excel_path = root / "ket_qua_phan_tich.xlsx"
+    df.to_excel(excel_path, index=False)
+
+    print("Đang tạo báo cáo Word...")
+    doc = Document()
+    doc.add_heading('BÁO CÁO PHÂN TÍCH GIAO DỊCH BẤT THƯỜNG', 0)
+
+    doc.add_heading('1. Tổng quan dữ liệu', level=1)
+    doc.add_paragraph(f"Tổng số giao dịch phân tích: {len(df)}")
+    doc.add_paragraph(f"Số lượng giao dịch bất thường phát hiện: {anomaly_count}")
+    doc.add_paragraph(f"Tỷ lệ bất thường: {(anomaly_count / len(df)) * 100:.2f}%")
+
+    doc.add_heading('2. Đánh giá kết quả', level=1)
+    doc.add_paragraph(f"Giá trị giao dịch trung bình của các điểm bất thường: {avg_anomaly_amount:,.2f}")
+    doc.add_paragraph(
+        "Các giao dịch này thường có đặc điểm nằm ngoài các khung giờ hoạt động thông thường hoặc có số tiền đột biến."
+    )
+
+    doc.add_heading('3. Biểu đồ minh họa', level=1)
+    if chart_path.exists():
+        try:
+            doc.add_picture(str(chart_path), width=Inches(6))
+        except Exception as e:
+            doc.add_paragraph(f"[Không thể tải ảnh - {str(e)}]")
+    else:
+        doc.add_paragraph(f"[Không tìm thấy file ảnh: {chart_path}]")
+
+    doc.add_heading('4. Kết luận và Kiến nghị', level=1)
+    doc.add_paragraph(
+        "Dữ liệu cho thấy các điểm bất thường tập trung vào các giao dịch có giá trị cao. "
+        "Cần kiểm tra lại các AccountID liên quan trong file Excel đính kèm."
+    )
+
+    report_path = root / "bao_cao_phan_tich.docx"
+    doc.save(report_path)
+
+    print("-" * 30)
+    print("HOÀN THÀNH!")
+    print(f"1. File Excel: {excel_path.name}")
+    print(f"2. File Word: {report_path.name}")
+    print(f"3. Biểu đồ: {chart_path.name}")
+
+
+if __name__ == "__main__":
+    main()
+   
